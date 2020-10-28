@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -m32 -Wall -Werror -Wno-unused -g -O2 -I.
+CFLAGS = -m32 -Wall -Werror -Wno-unused -g -O0 -I.
 OBJDIR = obj
 PROGRAM = cachesim
 
@@ -12,7 +12,7 @@ dirs:
 	@mkdir -p $(OBJDIR)
 
 $(PROGRAM): $(patsubst %, $(OBJDIR)/%, $(OBJS))
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CC) $(CFLAGS) $^ -o $@ -lm
 
 $(OBJDIR)/%.o: %.c dirs
 	$(CC) $(CFLAGS) -c $< -o $@

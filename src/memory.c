@@ -1,95 +1,105 @@
-/** @file memory.c
- *  @brief Implements starting point for a memory hierarchy with caching and RAM.
- *  @see memory.h
- */
 
 #include "memory.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 
+// Cache parameters
+#define l1_instr_size 32
+#define l1_instr_blocksize 64
+#define l1_instr_assosiativity 4
+#define l1_instr_policy 1
+
+#define l1_data_size 32
+#define l1_data_blocksize 64
+#define l1_data_assosiativity 8
+#define l1_data_policy 1
+
+#define l2_size 256
+#define l2_blocksize 64
+#define l2_assosiativity 8
+#define l2_policy 1
+
+// Instruction counter
 static unsigned long instr_count;
-/*L1 instruction cache*/
-#define L1instr_CacheSize 32    //KB
-#define L1instr_Associativity 4 //n-way
-#define L1instr_BlockSize 64    //Bytes
 
-/*L1 data cache*/
-#define L1data_CacheSize 32     //KB
-#define L1data_Associativity 4  //n-way
-#define L1data_BlockSize 64     //Bytes
+// Typedef-ing structures
+typedef struct cache cache_t;
+typedef struct info info_t;
 
-/*L2 unified cache*/
-#define L2_CacheSize 256        //KB
-#define L2_Associativity 4      //n-way
-#define L2_BlockSize 64         //Bytes
+// Global variables representing each cache structure
+static cache_t *cache_one_instr, *cache_one_data, *cache_two;
 
-typedef struct cache_array cache_array_t;
-struct cache_array  //Structure for sets and blocks inside the cache
-{
-  unsigned int index; //locates which set inside the cache
-  unsigned int tag;   //Locates the block inside the set
-  unsigned int valid; //For checking if the block contains an adress
-  unsigned int LRU;   //Replacement policy for the cache
+// Structure for each cache block
+struct info {
+  unsigned int index;
+  unsigned int lru;
+  unsigned int valid;
+  unsigned int tag;
   unsigned int dirtybit;
 };
 
-typedef struct cache cache_t;                                                       //Renaming "struct cache" to just "cache_t"
-struct cache //struktur som inneholder parametre til cache
-{
-  cache_array_t **array;
+// Structure for each cache
+struct cache{
+  info_t **array;
   unsigned int size;
-  unsigned int associativity;
   unsigned int blocksize;
-  unsigned int buswidth;
-  char *policy;
-  unsigned int sets;
+  unsigned int index_sets;
   unsigned int tag_bitsize;
   unsigned int index_bitsize;
   unsigned int offset_bitsize;
-  unsigned int cachehit;
-  unsigned int cachemiss;
+  int associativity;
+  unsigned int hit;
+  unsigned int miss;
+  int policy;
   cache_t *next;
 };
 
-static cache_t *L1instructionCache, *L1dataCache, *L2unifiedCache;
-
-//Creates a cache with given cache size(KB), associativity(n-way) and block size(bytes)
-cache_t *cache_create(int size, int associativity, int blocksize)
+/*
+ * Create a cache with given cache-size(kb), block size (B), associativity(int), policy(int)
+ */
+static cache_t *cache_create(unsigned int size, unsigned int block_size, int associative, int policy)
 {
-  cache_t *cache = malloc(sizeof(cache_t));                                         //Allocate memory for the cache                                      //Setter av plass til cachen
-  if(cache == NULL){                                                                //Hvis cachen er tom
-    return NULL;                                                                    //Returner NULL
+  // Allocating memory for cache structure
+  cache_t *cache = malloc(sizeof(cache_t));
+  if(cache == NULL){
+    return NULL;
   }
-  
-  cache->cachehit = 0;
-  cache->size = (size * 128);                                                         //Converting the size from kilobytes to bytes (from 32KB to 4096bytes)
-  cache->blocksize = blocksize;
-  cache->associativity = associativity;
-  cache->offset_bitsize = log(cache->blocksize * 4) / log(2);                       //Calculating how many bits is needed for the block offset
-  cache->sets = cache->size / (cache->blocksize * cache->associativity);            //Calculating how many sets the cache will contain
-  cache->index_bitsize = log(cache->sets) / log(2);                                 //Calculating how many bits is needed for the index
-  cache->tag_bitsize = (32 - cache->index_bitsize - cache->offset_bitsize);         //Calculating how many bits is needed for the tag
-  //cache->buswidth = 64;
-  //cache->policy = "LeastRecentlyUsed";
-  //cache->cachemiss = 0;
+  unsigned int new_size, offset_bits, index_size, index_bits;
+  // Finding the cache size in bytes
+  new_size = size * 128;
+  // Finding the amount of bits needed in cache structure
+  offset_bits = log2(block_size * 4);
+  index_size = new_size / (block_size * associative);
+  index_bits = log2(index_size);
 
-  cache->array = calloc(cache->size, sizeof(cache_array_t));                        //Allocating memory for an empty array
+  cache->hit = 0;
+  cache->miss = 0;
+  cache->size = new_size;
+  cache->blocksize = block_size;
+  cache->associativity = associative;
+  cache->offset_bitsize = offset_bits;
+  cache->index_sets = index_size;
+  cache->index_bitsize = index_bits;
+  cache->tag_bitsize = 32 - index_bits - offset_bits;
+  cache->policy = policy;
+
+  // Allocate memory for an empty array
+  cache->array = calloc(new_size, sizeof(info_t));
   if(cache->array == NULL){
     if(cache != NULL){
       free(cache);
     }
     return NULL;
   }
- 
-  //For every struct/set in the array, the LRU value in set to 0,1,2 and 3
-  int i = 0;
-  
-  for(i=0; i<cache->sets * cache->associativity; i++){
-    cache_array_t *cache_array = malloc(sizeof(cache_array_t));
-    cache->array[i] = cache_array;
+
+  // Allocate memory for the structure in each array position in the cache
+  for(int i = 0; i < index_size * associative; i++){
+    info_t *info = malloc(sizeof(info_t));
+    cache->array[i] = info;
     cache->array[i]->index = 0;
-    cache->array[i]->LRU = 0;
+    cache->array[i]->lru = 0;
     cache->array[i]->valid = 0;
     cache->array[i]->tag = 0;
     cache->array[i]->dirtybit = 0;
@@ -97,27 +107,16 @@ cache_t *cache_create(int size, int associativity, int blocksize)
   return cache;
 }
 
-//Destroys a given cache
-void cache_destroy(cache_t *cache)
+// Set up index values and lru values
+// for all elements in the array
+static void set_index_lru(cache_t *cache)
 {
-  int i;
-  for(i = 0; i<cache->sets * cache->associativity; i++){
-    free(cache->array[i]);
-  }
-  free(cache->array);
-  free(cache);
-}
-
-//Set up index values and LRU-values for all element in the array
-void set_index_lru(cache_t *cache)
-{ 
   int i = 0;
   int k = 0;
-
-  //Set a LRU-value for every array position for each index
-  while(i < (cache->sets * cache->associativity)){
-    for(int j = 0; j< cache->associativity; j++){
-      cache->array[i]->LRU = j;
+  // Set an unique lru value for evey array-position for each index
+  while(i < (cache->index_sets * cache->associativity) ){
+    for(int j = 0; j < cache->associativity; j++){
+      cache->array[i]->lru = j;
       cache->array[i]->index = k;
       i++;
     }
@@ -125,152 +124,287 @@ void set_index_lru(cache_t *cache)
   }
 }
 
-//Function for checking if a given adress exists in the given cache
-int cache_contains(cache_t *cache, unsigned int adress) 
+/* Initializing memory subsystem*/
+void memory_init(void)
 {
-  //DIVIDING ADRESS INTO TAG, INDEX and OFFSET
-  int tagshift = 32 - cache->tag_bitsize;               //Calculating how many steps the tag needs to be shifted
-  int indexshift = 32 - cache->index_bitsize;           //Calculating how many steps the index needs to be shifted
-  int offsetshift = 32 - cache->offset_bitsize;         //Calculating how many steps the offset need to be shifted
+  // Allocate memory for the three caches,
+  // and set up the index values, and make each cache point
+  // to lower memory
+  cache_one_instr = cache_create(l1_instr_size, l1_instr_blocksize, l1_instr_assosiativity, l1_instr_policy);
+  set_index_lru(cache_one_instr);
+  cache_one_instr->next = cache_two;
 
-  int calculatetag = 4294967295 << cache->tag_bitsize;                                        //Making a number for & operation with adress, to get the tag bits
-  int calculateindex = (4294967295 >> (32-cache->index_bitsize)) << cache->offset_bitsize;    //Making a number for & operation with adress, to get the index bits
-  int calculateoffset = 4294967295 >> (32-cache->offset_bitsize);                             //Making a number for & operation woth adress, to get the offset bits
+  cache_one_data = cache_create(l1_data_size, l1_data_blocksize, l1_data_assosiativity, l1_data_policy);
+  set_index_lru(cache_one_data);
+  cache_one_data->next = cache_two;
 
-  int adresstag = adress&calculatetag;          //Assigning the tagnumber
-  int adressindex = adress&calculateindex;      //Assigning the indexnumber
-  int adressoffset = adress & calculateoffset;  //Assigning the offsetnumber
+  cache_two = cache_create(l2_size, l2_blocksize, l2_assosiativity, l2_policy);
+  set_index_lru(cache_two);
+  cache_two->next = NULL;
 
+  // Set instruction_counter to 0
+  instr_count = 0;
+}
+
+/*
+ * Function checking if given address
+ * exists in the cache.
+ * Returns 1 if address is in cache and 0 if not.
+ * If address exists we update the lru values
+ */
+static int cache_contains(cache_t *cache, unsigned int address)
+{
   int i = 0;
+  unsigned int addr_index, addr_tag;
+  // Define the starting bit of the index
+  int start = cache->offset_bitsize;
+  // Define the start of the tag (end of the index)
+  int end = 32 - cache->tag_bitsize;
+  // Set all bits below the end to 1's
+  int bitmask = (1 << (end - start)) - 1;
 
-  while(i<(cache->sets * cache->associativity)){          //Going through all the sets and blocks in the cache
-    if(cache->array[i]->index == adressindex){            //Check if the index in the cache matches the index in the given adress
-      if(cache->array[i]->valid == 1){                    //Check if the valid bit in the cache is set to 1 
-        if(cache->array[i]->tag == adresstag){            //Check if the tag in the cache matches the tag in the given adress
-        //DO ALOT OF STUFF AND RETURN 1
-          int highest_lru = cache->array[i]->LRU;         //Keeping the LRU-value at the current array position
-          int lru_pos = i;                                //Keeping the position value
-          int start_index = i - (i%cache->associativity); //Keeping the current position in index
+  // Slice out the index and tag from the address
+  addr_index = (address >> start) & bitmask;
+  addr_tag = address >> (cache->offset_bitsize + cache->index_bitsize);
 
-          for(i=0; i<cache->associativity; i++){          //Update all the lru-values for the given index
-            if(cache->array[start_index]->LRU < highest_lru){
-              cache->array[start_index]->LRU++;
+  // Iterate over the cache array
+  while(i < (cache->index_sets * cache->associativity) ){
+    // Check if the given index matches
+    // the current array index
+    if(cache->array[i]->index == addr_index){
+      // Check if the tag matches
+      if(cache->array[i]->tag == addr_tag){
+        // Reset counter to the beginning of the current index
+        i = i - (i % cache->associativity);
+        int start_index = i;
+        int counter;
+
+        // Find the highest lru value in the current index,
+        // and check the valid bit of the block
+        for(counter = 0; counter < cache->associativity; counter++, i++){
+          if(cache->array[i]->lru == cache->associativity - 1){
+            if(cache->array[i]->valid == 1){
+              break;
             }
-            else if(cache->array[start_index]->LRU > highest_lru){
-              cache->array[lru_pos]->LRU++;
-              lru_pos = start_index;
-              highest_lru = cache->array[start_index]->LRU;
-            }
-            start_index++;
           }
-          cache->array[lru_pos]->LRU = 0;  //Set the LRU-value for the accesed element to 0
-          return 1;
+        }
+        // Define the start of the current index
+        int index_lenght = start_index + cache->associativity;
+        // Update all the lru values in the current index
+        for(start_index; start_index < index_lenght; start_index++){
+          cache->array[start_index]->lru = (cache->array[start_index]->lru + 1) % cache->associativity;
+        }
+        return 1;
       }
     }
-  }
     i++;
   }
   return 0;
 }
 
-//Adds a given adress to the cache when a miss has occured
-void cache_add(cache_t *cache, unsigned int adress) 
+/*
+ * Function for read-operation for write-through policy
+ */
+static void cache_wt_read(cache_t *cache, unsigned int address)
 {
-  //DIVIDING ADRESS INTO TAG, INDEX and OFFSET
-  int highest_lru;
-  int lru_pos;
-  int start_index;
-
-  int tagshift = 32 - cache->tag_bitsize;               //Calculating how many steps the tag needs to be shifted
-  int indexshift = 32 - cache->index_bitsize;           //Calculating how many steps the index needs to be shifted
-  int offsetshift = 32 - cache->offset_bitsize;         //Calculating how many steps the offset need to be shifted
-
-  int calculatetag = 4294967295 << cache->tag_bitsize;                                        //Making a number for & operation with adress, to get the tag bits
-  int calculateindex = (4294967295 >> (32-cache->index_bitsize)) << cache->offset_bitsize;    //Making a number for & operation with adress, to get the index bits
-  int calculateoffset = 4294967295 >> (32-cache->offset_bitsize);                             //Making a number for & operation woth adress, to get the offset bits
-
-  int adresstag = adress&calculatetag;          //Assigning the tagnumber
-  int adressindex = adress&calculateindex;      //Assigning the indexnumber
-  int adressoffset = adress & calculateoffset;  //Assigning the offsetnumber
-  
   int i = 0;
+  int start_index;
+  unsigned int addr_index, addr_tag;
+  // Define the starting bit of the index
+  int start = cache->offset_bitsize;
+  // Define the start of the tag (end of the index)
+  int end = 32 - cache->tag_bitsize;
+  // Set all bits below the end to 1's
+  int bitmask = (1 << (end - start)) - 1;
 
-  while(cache->array[i]->index != adressindex){  //Find the first valid index in the array and set "i" to be this value
+  // Slice out the index and tag from the address
+  addr_index = (address >> start) & bitmask;
+  addr_tag = address >> (cache->offset_bitsize + cache->index_bitsize);
+
+  // Iterate through the array of the cache
+  while(i < cache->associativity * cache->index_sets){
+    // Check if the current index matches the
+    // wanted index of the address
+    if(cache->array[i]->index == addr_index){
+      // Store the start of the current index in the array
+      start_index = i - (i % cache->associativity);
+      int j;
+
+      // Find the highest lru value
+      for(j = 0; j < cache->associativity; j++){
+        if(cache->array[i]->lru == cache->associativity - 1){
+          break;
+        }
+      }
+      // Give values for valid bit, dirtybit, and tag
+      cache->array[i]->valid = 1;
+      cache->array[i]->dirtybit = 0;
+      cache->array[i]->tag = addr_tag;
+
+      // Update all the lru-values on the current index
+      for(start_index; start_index < cache->associativity; start_index++){
+        cache->array[start_index]->lru = (cache->array[start_index]->lru + 1) % cache->associativity;
+      }
+    }
     i++;
-  }
-
-  //Store the array position of the valid index and its LRU-value
-  if(i < cache->sets * cache->associativity){
-    start_index = i;
-    highest_lru = cache->array[i]->LRU;           //Store the array position where the valid index is
-    lru_pos = start_index;
-
-    //Go through all element in the array with the valid index, and find the array position that has the higest LRU-value
-    while(cache->array[i]->index == adressindex){   //While the array index matches the given adresses index
-      if(cache->array[i]->LRU > highest_lru){       //check if the LRU-value in the array is bigger than the current lru-value
-        highest_lru = cache->array[i]->LRU;         //Set the higest lru value to the lru-value in the array
-        lru_pos = i;                                //Updating the lru position
-      }
-      i++;
-      if(i < cache->sets * cache->associativity){   //If "i" is less than all sets and blocks in the cache
-        break;                                      //quit the loop
-      }
-    }
-    //Read data from lower memory into the cache block and set valid bit to 1
-    //IF the block is not changed (if the dirtybit is 0)
-    if(cache->array[lru_pos]->dirtybit == 0){ //If the memory is not changed
-      cache->array[lru_pos]->valid = 1;       //array valid bit is set to 1, meaning the block now has an element
-      cache->array[lru_pos]->tag = adresstag; //Setting the tag in the cache to match the tag in the adress
-    }
-    else if(cache->array[lru_pos]->dirtybit == 1){  //If the memory is changed
-      if(cache->next != NULL){                      //If the next cache level is not empty
-        unsigned int new_tag;                       //For keeping the new tag
-        unsigned int new_offset;                    //For keeping the new offset
-        unsigned int new_index;                     //For keeping the new index 
-        unsigned int new_adress;                    //For keeping the new adress
-        new_tag = cache->array[lru_pos]->tag << (cache->index_bitsize + cache->offset_bitsize);
-        new_index = cache->array[lru_pos]->index << cache->offset_bitsize;
-        new_adress = new_tag + new_index;
-        cache_add(cache->next, new_adress);
-      }
-    }
-    //Increase all lru values on the given index, but keep the values lower than the number of way-associativities
-    for(i = 0; i < cache->associativity; i++){
-      cache->array[start_index]->LRU = (cache->array[start_index]->LRU +1) % cache->associativity;
-      start_index++;
-    }
   }
 }
 
-//Sets dirtybit to "1" if the blockdata in the cache is modified, "0" if not modified
-void set_dirtybit(cache_t *cache, unsigned int adress, int dirtybit)
+/*
+ * Function for write-operation for write through
+ */
+static void cache_wt_write(cache_t *cache, unsigned int address)
 {
-  //DIVIDING ADRESS INTO TAG, INDEX and OFFSET
-  int tagshift = 32 - cache->tag_bitsize;               //Calculating how many steps the tag needs to be shifted
-  int indexshift = 32 - cache->index_bitsize;           //Calculating how many steps the index needs to be shifted
-  int offsetshift = 32 - cache->offset_bitsize;         //Calculating how many steps the offset need to be shifted
-
-  int calculatetag = 4294967295 << cache->tag_bitsize;                                        //Making a number for & operation with adress, to get the tag bits
-  int calculateindex = (4294967295 >> (32-cache->index_bitsize)) << cache->offset_bitsize;    //Making a number for & operation with adress, to get the index bits
-  int calculateoffset = 4294967295 >> (32-cache->offset_bitsize);                             //Making a number for & operation woth adress, to get the offset bits
-
-  int adresstag = adress&calculatetag;          //Assigning the tagnumber
-  int adressindex = adress&calculateindex;      //Assigning the indexnumber
-  int adressoffset = adress & calculateoffset;  //Assigning the offsetnumber
-  
   int i = 0;
+  int start_index;
+  unsigned int addr_index, addr_tag;
+  // Define the starting bit of the index
+  int start = cache->offset_bitsize;
+  // Define the start of the tag (end of the index)
+  int end = 32 - cache->tag_bitsize;
+  // Set all bits below the end to 1's
+  int bitmask = (1 << (end - start)) - 1;
 
-  //Check if adress exists in the cache by checking if the valid tag, index and tag is valid
-  //Returns 1 if adress exists in the cache
-  while(i < (cache->sets * cache->associativity)){
-    if(cache->array[i]->index == adressindex){
-      if(cache->array[i]->valid == 1){
-        if(cache->array[i]->tag == adresstag){
-          while(cache->array[i]->LRU != 0){
-            i++;
-          }
-          cache->array[i]->dirtybit = dirtybit;
+  // Slice out the index and tag from the address
+  addr_index = (address >> start) & bitmask;
+  addr_tag = address >> (cache->offset_bitsize + cache->index_bitsize);
+
+  // Iterate through the array of the given cache
+  while(i < cache->associativity * cache->index_sets){
+    // Check if the current index matches the
+    // wanted index from the address
+    if(cache->array[i]->index == addr_index){
+      start_index = i - (i % cache->associativity);
+      int j;
+      // Find the position of the highest lru-value
+      for(j = 0; j < cache->associativity; j++){
+        if(cache->array[i]->lru == cache->associativity - 1){
           break;
+        }
+      }
+      // Set new values for the tag, validbit and dirtybit,
+      // on the least recently used block of the index
+      cache->array[i]->tag = addr_tag;
+      cache->array[i]->valid = 1;
+      cache->array[i]->dirtybit = 1;
+
+      // Write the data to the next cache if there is one
+      if(cache->next != NULL){
+        unsigned int new_tag, new_offset, new_index, new_address;
+        // Find new values for tag, index and address, and write to lower memory
+        new_tag = cache->array[i]->tag << (cache->index_bitsize + cache->offset_bitsize);
+        new_index = cache->array[i]->index << cache->offset_bitsize;
+        new_address = new_tag + new_index;
+        cache_wt_write(cache->next, new_address);
+      }
+
+      // Update the lru-values on the current index
+      for(start_index; start_index < cache->associativity; start_index++){
+        cache->array[start_index]->lru = (cache->array[start_index]->lru + 1) % cache->associativity;
+      }
+    }
+  i++;
+  }
+}
+
+/*
+ * Function for adding new address into cache when
+ * a miss has occured, using write-back
+ */
+static void cache_add(cache_t *cache, unsigned int address)
+{
+  int i = 0;
+  int start_index;
+  unsigned int addr_index, addr_tag;
+  // Define the starting bit of the index
+  int start = cache->offset_bitsize;
+  // Define the start of the tag (end of the index)
+  int end = 32 - cache->tag_bitsize;
+  // Set all bits below the end to 1's
+  int bitmask = (1 << (end - start)) - 1;
+
+  // Slice out the index and tag from the address
+  addr_index = (address >> start) & bitmask;
+  addr_tag = address >> (cache->offset_bitsize + cache->index_bitsize);
+
+  // Iterate through the array of the given cache
+  while(i < cache->associativity * cache->index_sets){
+    // Check if the current array-index matches
+    // the wanted index from the address
+    if(cache->array[i]->index == addr_index){
+      int start_index = i - (i % cache->associativity);
+      int j;
+
+      // Find the least recently used block and store
+      // its array-position
+      for(j = 0; j < cache->associativity; j++){
+        if(cache->array[i]->lru == cache->associativity - 1){
+          break;
+        }
+      }
+      // If the block is nt dirty we write values
+      // straight into the block and mark it as
+      // dirty.
+      if(cache->array[i]->dirtybit == 0){
+        cache->array[i]->valid = 1;
+        cache->array[i]->dirtybit = 1;
+        cache->array[i]->tag = addr_tag;
+      }
+      // If the block is dirty we check for lower memory cache
+      else if(cache->array[i]->dirtybit == 1){
+        if(cache->next != NULL){
+          unsigned int new_tag, new_offset, new_index, new_address;
+          // Calculate the address based on the tag and index for the dirty block,
+          // and write it to the lower memory cache
+          new_tag = cache->array[i]->tag << (cache->index_bitsize + cache->offset_bitsize);
+          new_index = cache->array[i]->index << cache->offset_bitsize;
+          new_address = new_tag + new_index;
+          cache_add(cache->next, new_address);
+          cache->array[i]->valid = 1;
+          cache->array[i]->dirtybit = 1;
+          cache->array[i]->tag = addr_tag;
+        }
+      }
+      // Update the lru-values for the given index
+      for(start_index; start_index < cache->associativity; start_index++){
+        cache->array[start_index]->lru = (cache->array[start_index]->lru + 1) % cache->associativity;
+      }
+    }
+    i++;
+  }
+}
+
+
+/*
+ * Function for setting a dirtybit value to a block
+ */
+static void set_dirtybit(cache_t *cache, unsigned int address, int dirtybit)
+{
+  int i = 0;
+  unsigned int addr_index, addr_tag;
+  // Define the starting bit of the index
+  int start = cache->offset_bitsize;
+  // Define the start of the tag (end of the index)
+  int end = 32 - cache->tag_bitsize;
+  // Set all bits below the end to 1's
+  int bitmask = (1 << (end - start)) - 1;
+
+  // Slice out the index and tag from the address
+  addr_index = (address >> start) & bitmask;
+  addr_tag = address >> (cache->offset_bitsize + cache->index_bitsize);
+
+
+  // Iterate through the array for the given cache
+  while(i < cache->index_sets * cache->associativity){
+    // Check if the current index matches the
+    // index from the address
+    if(cache->array[i]->index == addr_index){
+      // Find the most recently used block in the set
+      for(int j = 0; j < cache->associativity; j++){
+        if(cache->array[i + j]->lru == 0){
+          // Give the dirtybit the new value
+          cache->array[i + j]->dirtybit = dirtybit;
+          return;
         }
       }
     }
@@ -278,110 +412,178 @@ void set_dirtybit(cache_t *cache, unsigned int adress, int dirtybit)
   }
 }
 
-//Initializes memory subsystem
-void memory_init(void) 
-{  
-  L1instructionCache = cache_create(L1instr_CacheSize, L1instr_Associativity, L1instr_BlockSize);
-  set_index_lru(L1instructionCache);
-  L1instructionCache->next = L2unifiedCache;
-  L1dataCache = cache_create(L1data_CacheSize, L1data_Associativity, L1data_BlockSize);
-  set_index_lru(L1dataCache);
-  L1dataCache->next = L2unifiedCache;
-  L2unifiedCache = cache_create(L2_CacheSize, L2_Associativity, L2_BlockSize);
-  set_index_lru(L2unifiedCache);
-  L2unifiedCache->next = NULL;
-    
-  instr_count = 0;
-}
 
-//Checks if a given adress is in the L1 instruction cache and the L2 cache, and increments the corresponding caches "cachehit" or "cachemiss"
-void memory_fetch(unsigned int address, data_t *data) 
+/* Fetch addresses from trace file */
+void memory_fetch(unsigned int address, data_t *data)
 {
   printf("memory: fetch 0x%08x\n", address);
-  if(cache_contains(L1instructionCache, address) == 1){       //If the adress exists in the cache
-    L1instructionCache->cachehit++;                           //Increment its hit count
-  }
-  else if(cache_contains(L1instructionCache, address) == 0){  //If the adress is not in the cache
-    L1instructionCache->cachemiss++;                          //Increment its miss count
-    cache_add(L1instructionCache, address);                   //Add the adress to the cache
-    if(cache_contains(L2unifiedCache, address) == 1){         //Check if the adress is in the next level cache
-      L2unifiedCache->cachehit++;                             //If so increment its hit count
-    }
-    else if(cache_contains(L2unifiedCache, address) == 0){    //If the adress is not in the next level cache
-      cache_add(L2unifiedCache, address);                     //Add the adress
-    }
-  }
 
+  // Check if address already is in the cache
+  if(cache_contains(cache_one_instr, address) == 1){
+    cache_one_instr->hit++;
+  }
+  // Check if address doesn't exist in the cache
+  else if(cache_contains(cache_one_instr, address) == 0){
+    cache_one_instr->miss++;
+    // Check if write policy for cache is write-back
+    if(cache_one_instr->policy == 1){
+      // Read address into cache, and set dirtybit to 0
+      cache_add(cache_one_instr, address);
+      set_dirtybit(cache_one_instr, address, 0);
+    }
+    // Check if write policy is write-through
+    else if(cache_one_instr->policy == 0){
+      // Read address into cache
+      cache_wt_read(cache_one_instr, address);
+    }
+
+    // Check if address already is in the cache
+    if(cache_contains(cache_two, address) == 1){
+      cache_two->hit++;
+    }
+    // Check if the address is not in the cache
+    else if(cache_contains(cache_two, address) == 0){
+      cache_two->miss++;
+      // Check if write policy is write-back
+      if(cache_two->policy == 1){
+        // Read address into cache, and set
+        // dirtybit to 0
+        cache_add(cache_two, address);
+        set_dirtybit(cache_one_instr, address, 0);
+      }
+      // Check if write policy is write-through
+      else if(cache_two->policy == 0){
+        cache_wt_read(cache_two, address);
+      }
+    }
+  }
   instr_count++;
 }
 
-//Checks if a given adress is in the L1 data cache and the L2 cache, and increments the corresponding caches "cachehit" or "cachemiss"
+
+
+/* Read addresses from trace file */
 void memory_read(unsigned int address, data_t *data)
 {
   printf("memory: read 0x%08x\n", address);
 
-  if(cache_contains(L1dataCache, address) == 1){            //If L1data cache contains the adress
-    L1dataCache->cachehit++;                                //Increment its hit count
+  // Check if address already is in th cache
+  if(cache_contains(cache_one_data, address) == 1){
+    cache_one_data->hit++;
   }
-  else if(cache_contains(L1dataCache, address) == 0){       //If adress is not in the L1data cache
-    L1dataCache->cachemiss++;                               //Increment its miss count
-    cache_add(L1dataCache, address);                        //Add the adress to the cache
-    set_dirtybit(L1dataCache, address, 0);                  //Set dirty bit to "0" indicating that the memory is NOT modified
-    if(cache_contains(L2unifiedCache, address) == 1){       //If adress is in the L2 cache
-      L2unifiedCache->cachehit++;                           //Increment lv2 caches hit count
+  // Check if the address is not in the cache
+  else if(cache_contains(cache_one_data, address) == 0){
+    cache_one_data->miss++;
+    // Check if the write policy is write-back
+    if(cache_one_data->policy == 1){
+      // Read data into cache, and set dirtybit to 0
+      cache_add(cache_one_data, address);
+      set_dirtybit(cache_one_data, address, 0);
     }
-    else if(cache_contains(L2unifiedCache, address) == 0){  //If adress is not in the L2 cache
-      L2unifiedCache->cachemiss++;                          //Increment its miss count
-      cache_add(L2unifiedCache, address);                   //Add the adress to the cache
-      set_dirtybit(L2unifiedCache, address, 0);             //Set dirtybit to "0" indicating that the data is not modified
+    // Check if write policy is write-through
+    else if(cache_one_data->policy == 0){
+      cache_wt_read(cache_one_data, address);
+    }
+    // Check if address already is in cache
+    if(cache_contains(cache_two, address) == 1){
+      cache_two->hit++;
+    }
+    // Check if address is not in the cache
+    else if(cache_contains(cache_two, address) == 0){
+      cache_two->miss++;
+      // Check if write policy is write-back
+      if(cache_two->policy == 1){
+        // Read data into cache, and set dirtybit to 0
+        cache_add(cache_two, address);
+        set_dirtybit(cache_two, address, 0);
+      }
+      // Check if write policy is write-through
+      else if(cache_two->policy == 0){
+        // Read data into cache
+        cache_wt_read(cache_two, address);
+      }
     }
   }
-  
   instr_count++;
 }
 
-//Write-back policy, only writing back to memory IF a block in the cache needs to be replaced
+
+/* Write adress from trace file into cache */
 void memory_write(unsigned int address, data_t *data)
 {
   printf("memory: write 0x%08x\n", address);
 
-  if(cache_contains(L1dataCache, address) == 1){      //If adress we want to write is already inn the L1data cache
-    set_dirtybit(L1dataCache, address, 1);            //Set the corresponding dirty bit to "1" indicating that it ahs been modified
-    L1dataCache->cachehit++;                          //Increment the caches hit count
+  // Check if address already is in the cache
+  if(cache_contains(cache_one_data, address) == 1){
+    cache_one_data->hit++;
+    // Check if write policy is write-back
+    if(cache_one_data->policy == 1){
+      // Write data into cache, and set dirtybit to 1
+      cache_add(cache_one_data, address);
+      set_dirtybit(cache_one_data, address, 1);
+    }
   }
-  else if(cache_contains(L1dataCache, address) == 0){ //If adress we want to write is not in the cache
-    cache_add(L1dataCache, address);                  //add this write/adress to the cache
-    set_dirtybit(L1dataCache, address, 1);            //set dirtybit to "1" indicating that the adress has been modified
+  // Check if address is not already in the cache
+  else if(cache_contains(cache_one_data, address) == 0){
+    cache_one_data->miss++;
+    // Check if write policy is write-back
+    if(cache_one_data->policy == 1){
+      // Write data into cache, and set dirtybit to 1
+      cache_add(cache_one_data, address);
+      set_dirtybit(cache_one_data, address, 1);
+    }
+    // Check if write policy is write-through
+    else if(cache_one_data->policy == 0){
+      // Write data into cache
+      cache_wt_write(cache_one_data, address);
+    }
   }
-  
   instr_count++;
 }
 
-//Deinitializes memory subsystem
-void memory_finish(void)  
+
+// Deallocate memory for cache
+static void cache_destroy(cache_t *cache)
+{
+  // Free memory allocated for the structure in each array-element
+  int i;
+  for(i = 0; i < cache->index_sets * cache->associativity; i++){
+    free(cache->array[i]);
+  }
+  // Free the memory allocated for the array,
+  // and the memory allocated for the cache itself
+  free(cache->array);
+  free(cache);
+}
+
+/* Deinitialize memory subsystem */
+void memory_finish(void)
 {
   fprintf(stdout, "Executed %lu instructions.\n\n", instr_count);
-  
-  unsigned int hitrate_L1instructioncache;
-  unsigned int hitrate_L1datacache;
-  unsigned int hitrate_L2cache;
-  double hit_L1instruction;
-  double hit_L1data;
-  double hit_L2unified;
 
-  hitrate_L1instructioncache = L1instructionCache->cachehit;
-  hitrate_L1datacache = L1dataCache->cachehit;
-  hitrate_L2cache = L2unifiedCache->cachehit;
+  unsigned int hitrate_one_instr, hitrate_one_data, hitrate_two, instr_miss, data_miss, l2_miss;
+  double hit_ins, hit_data, hit_two;
 
-  hit_L1instruction = ((double)hitrate_L1instructioncache / (double)instr_count)*100;
-  hit_L1data = ((double)hitrate_L1datacache / (double)instr_count)*100;
-  hit_L2unified = ((double)hitrate_L2cache / (double)instr_count)*100;
+  // Store amount of hits for each cache
+  hitrate_one_instr = cache_one_instr->hit;
+  hitrate_one_data = cache_one_data->hit;
+  hitrate_two = cache_two->hit;
+  // Store total accesses for each cache
+  instr_miss = (cache_one_instr->hit + cache_one_instr->miss);
+  data_miss = (cache_one_data->hit + cache_one_data->miss);
+  l2_miss = (cache_two->hit + cache_two->miss);
+  // Find the hit percentage for each cache
+  hit_ins = ((double)hitrate_one_instr / (double)instr_miss)*100;
+  hit_data = ((double)hitrate_one_data / (double)data_miss)*100;
+  hit_two = ((double)hitrate_two / (double)l2_miss)*100;
 
-  fprintf(stdout, "Hitrate level one instruction cache: %u, %f%c \n", hitrate_L1instructioncache, hit_L1instruction, '%');
-  fprintf(stdout, "Hitrate level one data cache: %u, %f%c \n", hitrate_L1datacache, hit_L1data, '%');
-  fprintf(stdout, "Hitrate level two cache: %u, %f%c \n", hitrate_L2cache, hit_L2unified, '%');
+  // Output results
+  fprintf(stdout, "Hitrate level one instruction cache: %u of %u instructions; %f%c \n", hitrate_one_instr, instr_miss, hit_ins, '%');
+  fprintf(stdout, "Hitrate level one data cache: %u of %u instructions; %f%c \n", hitrate_one_data, data_miss, hit_data, '%');
+  fprintf(stdout, "Hitrate level two cache: %u of %u instructions; %f%c \n", hitrate_two, l2_miss, hit_two, '%');
 
-  cache_destroy(L1instructionCache);
-  cache_destroy(L1dataCache);
-  cache_destroy(L2unifiedCache);
+  // Deallocate memory that were allocated
+  cache_destroy(cache_one_instr);
+  cache_destroy(cache_one_data);
+  cache_destroy(cache_two);
 }

@@ -1,0 +1,11 @@
+I  04000c70,2   miss
+I  04000c72,3   hit
+I  04000c76,5   hit
+I  04001865,2   miss
+I  04009eed,3   miss
+I  04009eed,3   hit           3 of 6 Instruction cache, 50%
+
+ S fe977a88,4   miss
+ S fe977a88,4   hit
+ S fe977a80,4   hit
+ L fe977a80,4   hit           3 of 4 Data cache, 75%
